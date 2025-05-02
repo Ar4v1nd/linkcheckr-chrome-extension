@@ -1,21 +1,40 @@
 'use strict';
 
-// With background scripts you can communicate with popup
-// and contentScript files.
-// For more information on background script,
-// See https://developer.chrome.com/extensions/background_pages
-
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.type === 'GREETINGS') {
-    const message = `Hi ${
-      sender.tab ? 'Con' : 'Pop'
-    }, my name is Bac. I am from Background. It's great to hear from you.`;
+  if (request.type === 'validate') {
+    let href = request.payload.href;
 
-    // Log message coming from the `request` parameter
-    console.log(request.payload.message);
-    // Send a response message
-    sendResponse({
-      message,
-    });
+    (async () => {
+      if (!href || href.startsWith('javascript:')) {
+        sendResponse({ payload: { statusCode: 400 } });
+        return;
+      }
+
+      if (
+        href.startsWith('#') ||
+        href.startsWith('data:') ||
+        href.startsWith('mailto:') ||
+        href.startsWith('tel:')
+      ) {
+        sendResponse({ payload: { statusCode: 200 } });
+        return;
+      }
+
+      try {
+        const response = await fetch(href, {
+          method: 'GET',
+          headers: {
+            Range: 'bytes=0-0',
+          },
+          redirect: 'follow',
+        });
+        sendResponse({ payload: { statusCode: response.status } });
+      } catch (error) {
+        console.warn(`Error fetching ${href}:`, error);
+        sendResponse({ payload: { statusCode: 'Error' } });
+      }
+    })();
+
+    return true;
   }
 });

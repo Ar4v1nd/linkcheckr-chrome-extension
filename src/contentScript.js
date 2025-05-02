@@ -1,43 +1,105 @@
 'use strict';
 
-// Content script file will run in the context of web page.
-// With content script you can manipulate the web pages using
-// Document Object Model (DOM).
-// You can also pass information to the parent extension.
+import { Readability } from '@mozilla/readability';
 
-// We execute this script by making an entry in manifest.json file
-// under `content_scripts` property
+const MAX_CACHE_SIZE = 1000; // Maximum number of cached links
+const documentClone = document.cloneNode(true);
+const reader = new Readability(documentClone);
+const article = reader.parse();
 
-// For more information on Content Scripts,
-// See https://developer.chrome.com/extensions/content_scripts
+if (article && article.content) {
+  const temp = document.createElement('div');
+  temp.innerHTML = article.content;
 
-// Log `title` of current active web page
-const pageTitle = document.head.getElementsByTagName('title')[0].innerHTML;
-console.log(
-  `Page title is: '${pageTitle}' - evaluated by Chrome extension's 'contentScript.js' file`
-);
+  const seen = new Set();
+  const linkElements = Array.from(document.querySelectorAll('a[href]'));
 
-// Communicate with background file by sending a message
-chrome.runtime.sendMessage(
-  {
-    type: 'GREETINGS',
-    payload: {
-      message: 'Hello, my name is Con. I am from ContentScript.',
+  const getCachedStatus = (url) => {
+    return new Promise((resolve) => {
+      chrome.storage.local.get(['linkStatusCache'], (result) => {
+        const cache = result.linkStatusCache || {};
+        resolve(cache[url]);
+      });
+    });
+  };
+
+  const setCachedStatus = (url, status) => {
+    chrome.storage.local.get(['linkStatusCache'], (result) => {
+      let cache = result.linkStatusCache || {};
+
+      cache[url] = {
+        status,
+        timestamp: Date.now(),
+      };
+
+      // Enforce cache size limit
+      const keys = Object.keys(cache);
+      if (keys.length > MAX_CACHE_SIZE) {
+        keys
+          .sort((a, b) => cache[a].timestamp - cache[b].timestamp)
+          .slice(0, keys.length - MAX_CACHE_SIZE)
+          .forEach((key) => delete cache[key]);
+      }
+
+      chrome.storage.local.set({ linkStatusCache: cache });
+    });
+  };
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+
+        const link = entry.target;
+        const hrefAttr = link.getAttribute('href');
+        let absoluteHref;
+
+        try {
+          absoluteHref = new URL(hrefAttr, window.location.href).href;
+        } catch {
+          return;
+        }
+
+        if (seen.has(absoluteHref)) return;
+        seen.add(absoluteHref);
+
+        getCachedStatus(absoluteHref).then((cached) => {
+          if (cached !== undefined) {
+            if (typeof cached.status === 'number' && cached.status >= 400) {
+              const icon =
+                '<sup title="Link is broken" style="color:red; margin-left:4px;">&#10008;</sup>';
+              link.insertAdjacentHTML('beforeend', icon);
+            }
+            return;
+          }
+
+          chrome.runtime.sendMessage(
+            {
+              type: 'validate',
+              payload: { href: absoluteHref },
+            },
+            (response) => {
+              const code = response.payload.statusCode;
+              setCachedStatus(absoluteHref, code);
+
+              if (typeof code === 'number' && code >= 400) {
+                const icon =
+                  '<sup title="Link is broken" style="color:red; margin-left:4px;">&#10008;</sup>';
+                link.insertAdjacentHTML('beforeend', icon);
+              }
+            }
+          );
+        });
+      }
     },
-  },
-  (response) => {
-    console.log(response.message);
-  }
-);
+    {
+      root: null,
+      rootMargin: '0px',
+      threshold: 0.1,
+    }
+  );
 
-// Listen for message
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.type === 'COUNT') {
-    console.log(`Current count is ${request.payload.count}`);
+  for (const link of linkElements) {
+    observer.observe(link);
   }
-
-  // Send an empty response
-  // See https://github.com/mozilla/webextension-polyfill/issues/130#issuecomment-531531890
-  sendResponse({});
-  return true;
-});
+}
